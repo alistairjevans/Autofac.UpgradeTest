@@ -1,0 +1,2 @@
+Autofac.Extensions.DependencyInjection
+Autofac.Mef
