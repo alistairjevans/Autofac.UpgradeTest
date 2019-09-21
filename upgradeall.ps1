@@ -1,12 +1,12 @@
 Param(
     # appveyor api key
     [string]
-    $appveyorApiKey = "v2.e1famufjxxxq8sgptk4q",
+    $appveyorApiKey,
 
     # Specify the branch to test against
     [Parameter(Mandatory = $true)]
     [string]
-    $testBranchName = "pr-immutable-container",
+    $testBranchName = "develop",
 
     # Specify the exact version here if you don't want to use the auto-calculated one
     [string]
@@ -27,9 +27,16 @@ if ($null -eq (Get-Command "nuget.exe" -ErrorAction SilentlyContinue))
     exit;
 }
 
-if(!(Test-Path "reports"))
+$reportsFolder = "reports";
+
+if($testBranchName)
 {
-    New-Item "reports" -ItemType Container | Out-Null;
+    $reportsFolder += "/$testBranchName";
+}
+
+if(!(Test-Path $reportsFolder))
+{
+    New-Item $reportsFolder -ItemType Container | Out-Null;
 }
 
 if($appveyorApiKey)
@@ -43,7 +50,7 @@ elseif (!$exactPackageVersion) {
 }
 
 # Go through each integration from the text file and clone the code from github
-$allIntegrations = Get-Content "integrationslist.txt";
+$allIntegrations = Get-Content "integrations.txt";
 
 "====================================="
 "Upgrading all Configured Integrations"
@@ -78,21 +85,28 @@ foreach ($integrationText in $allIntegrations) {
             git clone "https://github.com/autofac/$integration.git" $integrationPath
         }
 
-        $fullOutputFolderPath = Join-Path $PSScriptRoot "reports";
+        $logFile = "$reportsFolder/$integration.log";
         
-        $logFile = "$fullOutputFolderPath/$integration.log";
-        
-        try {
+        $result = $null;
+        $failed = $false;
+
+        $reportsFolder = Resolve-Path $reportsFolder;
+
+        try 
+        {
             "Running upgrade test"
-            powershell ".\coreupgradetest.ps1 -checkoutDir $integrationPath -exactPackageVersion $exactPackageVersion -testOutputReportFile `"$fullOutputFolderPath\$integration`"" 2>&1 | Tee-Object -Variable result | Tee-Object $logFile
+            powershell ".\upgradeone.ps1 -checkoutDir $integrationPath -exactPackageVersion $exactPackageVersion -outputReport `"$reportsFolder\$integration`"" 2>&1 | Tee-Object -Variable result | Tee-Object $logFile
         }
-        catch {
+        catch 
+        {
             $result = "E: $_";
+            $failed = $true;
         }
 
         $finalOutput = $result | Where-Object { $_ -match "^[SEW]: " }
 
-        $allSuccess = $true;
+        # Ensure that we cannot be marked as successful if an exception occurred.
+        $allSuccess = !$failed;
 
         foreach ($lineOut in $finalOutput) {
             if($lineOut -match "^E: ")
@@ -122,10 +136,11 @@ foreach ($integrationText in $allIntegrations) {
 
 "---------------------------------------------"
 "Summary of Results"
-"Applying $testBranchName"
+"Tested against:"
+" $testBranchName $exactPackageVersion"
 "---------------------------------------------"
 
 # Output the results
-$results | Format-Table -Wrap;
+$results | Format-Table -Wrap -AutoSize;
 
 Pop-Location

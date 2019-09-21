@@ -1,0 +1,24 @@
+Autofac.AspNetCore.Multitenant
+Autofac.Configuration
+Autofac.Extensions.DependencyInjection
+Autofac.Extras.AggregateService
+Autofac.Extras.CommonServiceLocator
+Autofac.Extras.DomainServices # req silverlight
+Autofac.Extras.DynamicProxy
+Autofac.Extras.EnterpriseLibraryConfigurator
+Autofac.Extras.FakeItEasy
+Autofac.Extras.Moq
+Autofac.Extras.MvvmCross
+Autofac.Extras.NHibernate
+Autofac.Mef
+Autofac.Multitenant
+Autofac.Multitenant.Wcf
+Autofac.Mvc
+Autofac.Mvc.Owin
+Autofac.Owin
+Autofac.ServiceFabric
+Autofac.SignalR
+Autofac.Wcf
+Autofac.Web
+Autofac.WebApi
+Autofac.WebApi.Owin

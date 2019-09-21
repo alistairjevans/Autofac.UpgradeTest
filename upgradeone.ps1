@@ -13,9 +13,10 @@ Param(
     # and we'll grab it from MyGet (e.g. 4.9.2-pr-immutab-000635).
     [string]
     $exactPackageVersion,
-    # The location to place the generated test report
+    # The location to place the generated test report (minus the extension),
+    # this will vary based on project type.
     [string]
-    $testOutputReportFile
+    $outputReport
 )
 
 $ErrorActionPreference = "Stop";
@@ -136,7 +137,7 @@ else
 
 if($inCoreProject)
 {
-    $majorVersion = $sdkVersion -split '-' | Select -First 1;
+    $majorVersion = $sdkVersion -split '-' | Select-Object -First 1;
 
     if($majorVersion -eq "1.0.0")
     {
@@ -146,9 +147,8 @@ if($inCoreProject)
     else
     {
         # Shutdown the build server, because some tasks in packages may have been updated
-
-        # Don't catch errors here, because the installed dotnet instance may not have the build-server tool.
-        dotnet build-server shutdown 2>$1 | Out-Null
+        # Errors may happen here if we are pre 2.1
+        dotnet build-server shutdown
 
         dotnet build 
     }
@@ -198,7 +198,7 @@ if($inCoreProject)
         }
         else 
         {    
-            $reportFile = "${testOutputReportFile}_$($testProj.BaseName).trx";
+            $reportFile = "${outputReport}_$($testProj.BaseName).trx";
 
             if(![System.IO.Path]::IsPathRooted($reportFile))
             {
@@ -228,17 +228,17 @@ if($inCoreProject)
                     }
                     else 
                     {
-                        "E: $failedTests test(s) failed, $passedTests test(s) passed for $($testProj.BaseName). Report at $reportFile"
+                        "E: $failedTests test(s) failed, $passedTests test(s) passed for $($testProj.BaseName)"
                     }
                 }
                 else 
                 {
-                    "E: Could not parse TRX file for $($testProj.BaseName) to find ResultSummary/Counters, assuming failure."
+                    "E: Could not parse TRX file for $($testProj.BaseName) to find ResultSummary/Counters, assuming failure"
                 }
             }
             else 
             {
-                "W: No test report generated for $($testProj.BaseName), possible failure or may not be a test project."
+                "W: No test report generated for $($testProj.BaseName), possible failure or may not be a test project"
             }   
         }
     }
@@ -333,11 +333,11 @@ else
             $xunitRunner = Get-ChildItem -Path "${env:USERPROFILE}\.nuget\packages\xunit.runner.console\$knownXunitVersion\tools\" -Filter "xunit.console.exe" -Recurse | Select -First 1;
         }
        
-        & $xunitRunner.FullName $testDllPath -html "$testOutputReportFile.html"
+        & $xunitRunner.FullName $testDllPath -html "$outputReport.html"
         
         if($LastExitCode -ne 0)
         {
-            "E: Failing tests (report at $testOutputReportFile.html)"
+            "E: Failing tests"
         }
         else 
         {
