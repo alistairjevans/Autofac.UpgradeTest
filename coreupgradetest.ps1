@@ -18,6 +18,9 @@ Param(
     $testOutputReportFile
 )
 
+$ErrorActionPreference = "Stop";
+Set-ExecutionPolicy Bypass -Scope Process;
+
 if(!$checkoutDir)
 {
     $checkoutDir = Get-Location;
@@ -85,7 +88,8 @@ elseif (!$exactPackageVersion) {
 
 Push-Location $checkoutDir
 
-nuget sources add -Name "Autofac Upgrade MyGet" -Source https://www.myget.org/F/autofac/api/v2 -ConfigFile .\NuGet.Config
+# Apply a fixed NuGet config
+Copy-Item "$PSScriptRoot\NuGet.config" ".\NuGet.config" -FOrce
 
 $inCoreProject = $false;
 
@@ -104,28 +108,141 @@ if(Test-Path "global.json")
     .\dotnet-install.ps1 -Version $sdkVersion -InstallDir "temp_sdk" -SkipNonVersionedFiles;
 
     Pop-Location
-
-    dotnet restore;
 }
 
-# Locate all projects that contain an Autofac reference
-$childProjects = Get-ChildItem *.csproj -Recurse;
+# So it turns out that it's incredibly difficult to update nuget packages automatically
+# in a way that works consistently. So we're going to just load the XML and update it ourselves.
+# Not everything uses packagereferences either, so we'll need to update that.
 
-foreach($proj in $childProjects)
-{   
-    $packList = & dotnet list $proj.FullName package;
+# See if there are any packages.config files
+$packageConfigFiles = Get-ChildItem packages.config -Recurse
 
-    # Leave a space to avoid matching anything else
-    if($packList -match "Autofac ")
+if($packageConfigFiles)
+{
+    # Need the sln file.
+    $slnFile = Get-ChildItem "*.sln";
+
+    nuget restore
+
+    # Old style, just update the nuget packages using the CLI
+    nuget update $slnFile.Name -Id Autofac -Version $exactPackageVersion
+
+    if($LastExitCode -ne 0)
     {
-        dotnet remove $proj.FullName package Autofac
+        "E: Failed to update nuget package"
+        exit;
+    }
+}
+else 
+{
 
-        dotnet add $proj.FullName package Autofac --version $exactPackageVersion
+    # Locate all projects that contain an Autofac reference
+    $childProjects = Get-ChildItem *.csproj -Recurse;
+
+    $knownXunitVersion = $null;
+
+    foreach($proj in $childProjects)
+    {   
+        [xml] $projContent = Get-Content $proj.FullName -Raw;
+
+        [System.Xml.XmlNamespaceManager]$ns = $projContent.NameTable
+        $ns.AddNamespace("MsBuild", $projContent.DocumentElement.NamespaceURI)
+    
+        $versionNode = $projContent.SelectSingleNode("//MsBuild:PackageReference[@Include='Autofac']", $ns)
+
+        if($versionNode)
+        {
+            $versionNode.Version = $exactPackageVersion;
+            $projContent.Save($proj.FullName);
+        }
+        else 
+        {
+            # Need to add the reference from scratch. Use dotnet for this bit
+            dotnet add $proj.FullName package Autofac --version $exactPackageVersion;    
+        }
+
+        # Also look for an xunit console runner package, so we know which version to use.
+        $xunitReference = $projContent.SelectSingleNode("//MsBuild:PackageReference[@Include='xunit.runner.console']", $ns)
+        
+        if($xunitReference)
+        {
+            # We'll need this later if we are doing a non-core test.
+            $knownXunitVersion = $xunitReference.Version;
+        }
     }
 }
 
-if(!$inCoreProject)
+if($inCoreProject)
 {
+    # Shutdown the build server, because some tasks in packages may have been updated
+    # Don't catch errors here, because the installed dotnet instance may not have the build-server tool.
+    dotnet build-server shutdown | Out-Null
+
+    dotnet build 
+
+    if($LastExitCode -ne 0)
+    {
+        "E: Failed Build";
+        exit;
+    }
+
+    # Find all the test projects
+    $testProjects = Get-ChildItem "test/**/*.csproj";
+    
+    if(!$testProjects)
+    {
+        "S: Build Passed - No test projects"
+    }
+
+    foreach ($testProj in $testProjects) 
+    {
+        $reportFile = "${testOutputReportFile}_$($testProj.BaseName).trx";
+
+        if(![System.IO.Path]::IsPathRooted($reportFile))
+        {
+            $location = Get-Location;
+            $reportFile = Join-Path $location $reportFile;
+        }
+    
+        Remove-Item $reportFile -ErrorAction SilentlyContinue
+    
+        dotnet test $testProj.FullName --no-build --logger "trx;LogFileName=$reportFile"
+    
+        # We can't use exit codes for dotnet test, because it can succeed on the test execution but still
+        # give a failing code because of SDK configuration inside the projects. So we'll check the TRX file.
+    
+        if(Test-Path $reportFile)
+        {
+            [xml] $loadedTrx = Get-Content $reportFile -Raw;
+    
+            $counters = $loadedTrx.TestRun.ResultSummary.Counters;
+    
+            if($counters)
+            {
+                $failedTests = $counters.failed;
+                $passedTests = $counters.passed;
+
+                if($failedTests -eq 0)
+                {
+                    "S: All $passedTests tests passed for $($testProj.BaseName)"
+                }
+                else 
+                {
+                    "E: $failedTests test(s) failed, $passedTests test(s) passed for $($testProj.BaseName). Report at $reportFile"
+                }
+            }
+            else 
+            {
+                "E: Could not parse TRX file for $($testProj.BaseName) to find ResultSummary/Counters, assuming failure."
+            }
+        }
+        else 
+        {
+            "W: No test report generated for $($testProj.BaseName), possible failure or may not be a test project."
+        }        
+    }
+}
+else {
     # Need to do a regular nuget restore to get msbuild working
     nuget restore
 
@@ -149,31 +266,59 @@ if(!$inCoreProject)
         $vsWhereExe = Resolve-Path $vsWhereExe;
 
         $msbuildExe = & $vsWhereExe -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | select-object -first 1
-    }
-
-    & $msbuildExe -t:Build -p:Configuration=Release
         
-    # Locate xunit 
-    $xunitRunner = "${env:USERPROFILE}\.nuget\packages\xunit.runner.console\*\tools\xunit.console.exe";
-
-    $testDllPath = Resolve-Path test/*/bin/Release/*.Test.dll
-
-    & $xunitRunner $testDllPath -html "$testOutputReportFile.html"
-}
-else {
-
-    dotnet build 
-
-    if($LastExitCode -ne 0)
-    {
-        Write-Error "Failed Build";
     }
 
-    dotnet test --logger "trx;LogFileName=$testOutputReportFile.trx"
+    & $msbuildExe -t:Rebuild -p:Configuration=Release
 
     if($LastExitCode -ne 0)
     {
-        Write-Error "Failing tests (report at $testOutputReportFile.trx)"
+        "E: Failed Build"
+        exit;
+    }
+
+    $testDllPath = Resolve-Path test/*/bin/Release/*.Test.dll -ErrorAction SilentlyContinue
+
+    if($testDllPath)
+    {
+        if($packageConfigFiles)
+        {
+            $xunitRunner = Get-ChildItem -Path "packages\xunit.runner.console.*" -Filter "xunit.console.exe" -Recurse | Select -First 1
+
+            if(!$xunitRunner)
+            {
+                # No xunit runner (not all the projects have a console runner installed)
+                # So lets add one.
+                nuget install xunit.runner.console -OutputDirectory packages
+
+                $xunitRunner = Get-ChildItem -Path "packages\xunit.runner.console.*" -Filter "xunit.console.exe" -Recurse | Select -First 1;
+            }
+        }
+        else 
+        {
+            if(!$knownXunitVersion)
+            {
+                "E: Could not determine XUnit version";
+                exit;
+            }
+            # Locate xunit 
+            $xunitRunner = Get-ChildItem -Path "${env:USERPROFILE}\.nuget\packages\xunit.runner.console\$knownXunitVersion\tools\" -Filter "xunit.console.exe" -Recurse | Select -First 1;
+        }
+       
+        & $xunitRunner.FullName $testDllPath -html "$testOutputReportFile.html"
+        
+        if($LastExitCode -ne 0)
+        {
+            "E: Failing tests (report at $testOutputReportFile.html)"
+        }
+        else 
+        {
+            "S: All tests passed"
+        }
+    }
+    else 
+    {
+        "S: Build Passed - No test project"
     }
 }
 
