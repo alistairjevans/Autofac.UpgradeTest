@@ -11,7 +11,7 @@ Autofac.Web
 Autofac.Extras.NHibernate
 Autofac.Extras.EnterpriseLibraryConfigurator
 Autofac.Extras.CommonServiceLocator
-Autofac.Extras.DomainServices
+Autofac.Extras.DomainServices # req silverlight
 Autofac.Extras.DynamicProxy
 Autofac.Multitenant
 Autofac.Extras.FakeItEasy

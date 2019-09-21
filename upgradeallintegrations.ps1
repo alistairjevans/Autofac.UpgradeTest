@@ -3,8 +3,14 @@ Param(
     [string]
     $appveyorApiKey = "v2.e1famufjxxxq8sgptk4q",
 
+    # Specify the branch to test against
+    [Parameter(Mandatory = $true)]
     [string]
-    $testBranchName = "pr-immutable-container"
+    $testBranchName = "pr-immutable-container",
+
+    # Specify the exact version here if you don't want to use the auto-calculated one
+    [string]
+    $exactPackageVersion
 )
 
 Push-Location $PSScriptRoot
@@ -26,19 +32,36 @@ if(!(Test-Path "reports"))
     New-Item "reports" -ItemType Container | Out-Null;
 }
 
+if($appveyorApiKey)
+{
+    $exactPackageVersion = .\getLatestPackageForBranch.ps1 -appveyorApiKey $appveyorApiKey -autofacCoreBranchName $testBranchName;
+}
+elseif (!$exactPackageVersion) {
+    
+    Write-Error "Need to provide appveyor key or the exact package version."
+    exit;
+}
+
 # Go through each integration from the text file and clone the code from github
 $allIntegrations = Get-Content "integrationslist.txt";
 
+"====================================="
 "Upgrading all Configured Integrations"
+"Testing against:"
+" $testBranchName $exactPackageVersion"
+"====================================="
+
 $results = @();
 
-foreach ($integration in $allIntegrations) {
+foreach ($integrationText in $allIntegrations) {
 
-    if($integration -and ($integration -notmatch "^#"))
+    if($integrationText -and ($integrationText -notmatch "^#"))
     {
-        "-----------------------"
-        "Processing $integration"
-        "-----------------------"
+        "---------------------------"
+        "Processing $integrationText"
+        "---------------------------"
+
+        $integration = ($integrationText -split "#" | Select-Object -First 1).Trim();
 
         $integrationPath = "clones/$testBranchName/$integration";
 
@@ -61,7 +84,7 @@ foreach ($integration in $allIntegrations) {
         
         try {
             "Running upgrade test"
-            powershell ".\coreupgradetest.ps1 -checkoutDir $integrationPath -appveyorApiKey $appveyorApiKey -autofacCoreBranchName $testBranchName -testOutputReportFile `"$fullOutputFolderPath\$integration`"" 2>&1 | Tee-Object -Variable result | Tee-Object $logFile
+            powershell ".\coreupgradetest.ps1 -checkoutDir $integrationPath -exactPackageVersion $exactPackageVersion -testOutputReportFile `"$fullOutputFolderPath\$integration`"" 2>&1 | Tee-Object -Variable result | Tee-Object $logFile
         }
         catch {
             $result = "E: $_";
@@ -84,11 +107,11 @@ foreach ($integration in $allIntegrations) {
         if($allSuccess)
         {
 
-            $results += [pscustomobject] @{ Integration = $integration; Success = $true; Message = $combinedOutput; LogFile = "reports/$integration.log"; };
+            $results += [pscustomobject] @{ Integration = $integrationText; Success = $true; Message = $combinedOutput; LogFile = "reports/$integration.log"; };
             "Upgrade Test Succeeded for $integration"
         }
         else {
-            $results += [pscustomobject] @{ Integration = $integration; Success = $false; Message = $combinedOutput; LogFile = "reports/$integration.log"; };
+            $results += [pscustomobject] @{ Integration = $integrationText; Success = $false; Message = $combinedOutput; LogFile = "reports/$integration.log"; };
             "Upgrade Test Failed for $integration - $finalOutput"
         }
 

@@ -40,45 +40,7 @@ if ($null -eq (Get-Command "dotnet.exe" -ErrorAction SilentlyContinue))
 
 if($appveyorApiKey)
 {
-    # Find the latest package version on the specified branch.
-    # Appveyor has the actual package name
-    $apiUrl = 'https://ci.appveyor.com/api';
-    $token = $appveyorApiKey;
-    $headers = @{
-    "Authorization" = "Bearer $token"
-    "Content-type" = "application/json"
-    };
-    $accountName = 'Autofac';
-    $projectSlug = 'autofac';
-
-    # get project with last build details
-    $appveyorProject = Invoke-RestMethod -Method Get -Uri "$apiUrl/projects/$accountName/$projectSlug/branch/$autofacCoreBranchName" -Headers $headers
-
-    if(!$appveyorProject)
-    {
-        Write-Error("Could not locate branch, or api key is invalid.");
-        exit;
-    }
-
-    # we assume here that build has a single job
-    # get this job id
-    $jobId = $appveyorProject.build.jobs[0].jobId
-
-    # get job artifacts (just to get the outputted package name)
-    $artifacts = Invoke-RestMethod -Method Get -Uri "$apiUrl/buildjobs/$jobId/artifacts" -Headers $headers
-
-    $nugetPackageFileName = Split-Path $artifacts[0].fileName -Leaf
-
-    # Get the version from the nupkg name
-    $match = [Regex]::Match($nugetPackageFileName, "Autofac\.(?<version>.+)\.nupkg");
-
-    if(!$match.Success)
-    {
-        Write-Error "Cannot get Autofac version."
-        exit;
-    }
-
-    $exactPackageVersion = $match.Groups["version"].Value;
+    $exactPackageVersion = .\getLatestPackageForBranch.ps1 -appveyorApiKey $appveyorApiKey -autofacCoreBranchName $autofacCoreBranchName;
 }
 elseif (!$exactPackageVersion) {
     
@@ -174,11 +136,22 @@ else
 
 if($inCoreProject)
 {
-    # Shutdown the build server, because some tasks in packages may have been updated
-    # Don't catch errors here, because the installed dotnet instance may not have the build-server tool.
-    dotnet build-server shutdown | Out-Null
+    $majorVersion = $sdkVersion -split '-' | Select -First 1;
 
-    dotnet build 
+    if($majorVersion -eq "1.0.0")
+    {
+        dotnet restore
+        dotnet build **/project.json
+    }
+    else
+    {
+        # Shutdown the build server, because some tasks in packages may have been updated
+
+        # Don't catch errors here, because the installed dotnet instance may not have the build-server tool.
+        dotnet build-server shutdown 2>$1 | Out-Null
+
+        dotnet build 
+    }
 
     if($LastExitCode -ne 0)
     {
@@ -187,7 +160,7 @@ if($inCoreProject)
     }
 
     # Find all the test projects
-    $testProjects = Get-ChildItem "test/**/*.csproj";
+    $testProjects = Get-ChildItem "test/**/*.csproj","test/**/project.json";
     
     if(!$testProjects)
     {
@@ -196,53 +169,82 @@ if($inCoreProject)
 
     foreach ($testProj in $testProjects) 
     {
-        $reportFile = "${testOutputReportFile}_$($testProj.BaseName).trx";
+        if($majorVersion -eq "1.0.0")
+        {
+            $resultsNet10 = "";
 
-        if(![System.IO.Path]::IsPathRooted($reportFile))
-        {
-            $location = Get-Location;
-            $reportFile = Join-Path $location $reportFile;
-        }
-    
-        Remove-Item $reportFile -ErrorAction SilentlyContinue
-    
-        dotnet test $testProj.FullName --no-build --logger "trx;LogFileName=$reportFile"
-    
-        # We can't use exit codes for dotnet test, because it can succeed on the test execution but still
-        # give a failing code because of SDK configuration inside the projects. So we'll check the TRX file.
-    
-        if(Test-Path $reportFile)
-        {
-            [xml] $loadedTrx = Get-Content $reportFile -Raw;
-    
-            $counters = $loadedTrx.TestRun.ResultSummary.Counters;
-    
-            if($counters)
+            # No logger here, all we can do is look for the summary line
+            dotnet test $testProj.FullName | Tee-Object -Variable "resultsNet10";
+
+            $resultsNet10 = $resultsNet10 | Select-Object -Last 1;
+
+            if($resultsNet10 -match "Passed: (\d+), Failed: (\d+)")
             {
-                $failedTests = $counters.failed;
-                $passedTests = $counters.passed;
+                $passedTests = $Matches[1];
+                $failedTests = $Matches[2];
 
                 if($failedTests -eq 0)
                 {
-                    "S: All $passedTests tests passed for $($testProj.BaseName)"
+                    "S: All $passedTests test targets passed for $($testProj.Directory.Name)"
                 }
                 else 
                 {
-                    "E: $failedTests test(s) failed, $passedTests test(s) passed for $($testProj.BaseName). Report at $reportFile"
+                    "E: $failedTests test targets failed, $passedTests test targets passed for $($testProj.Directory.Name). Check log for details."
+                }
+            }
+            else {
+                "E: Could not read test results for .NET Core 1.0.0 tests"
+            }
+        }
+        else 
+        {    
+            $reportFile = "${testOutputReportFile}_$($testProj.BaseName).trx";
+
+            if(![System.IO.Path]::IsPathRooted($reportFile))
+            {
+                $location = Get-Location;
+                $reportFile = Join-Path $location $reportFile;
+            }
+        
+            Remove-Item $reportFile -ErrorAction SilentlyContinue
+            # We can't use exit codes for dotnet test, because it can succeed on the test execution but still
+            # give a failing code because of SDK configuration inside the projects. So we'll check the TRX file.
+            dotnet test $testProj.FullName --no-build --logger "trx;LogFileName=$reportFile"
+    
+            if(Test-Path $reportFile)
+            {
+                [xml] $loadedTrx = Get-Content $reportFile -Raw;
+
+                $counters = $loadedTrx.TestRun.ResultSummary.Counters;
+
+                if($counters)
+                {
+                    $failedTests = $counters.failed;
+                    $passedTests = $counters.passed;
+
+                    if($failedTests -eq 0)
+                    {
+                        "S: All $passedTests tests passed for $($testProj.BaseName)"
+                    }
+                    else 
+                    {
+                        "E: $failedTests test(s) failed, $passedTests test(s) passed for $($testProj.BaseName). Report at $reportFile"
+                    }
+                }
+                else 
+                {
+                    "E: Could not parse TRX file for $($testProj.BaseName) to find ResultSummary/Counters, assuming failure."
                 }
             }
             else 
             {
-                "E: Could not parse TRX file for $($testProj.BaseName) to find ResultSummary/Counters, assuming failure."
-            }
+                "W: No test report generated for $($testProj.BaseName), possible failure or may not be a test project."
+            }   
         }
-        else 
-        {
-            "W: No test report generated for $($testProj.BaseName), possible failure or may not be a test project."
-        }        
     }
 }
-else {
+else 
+{
     # Need to do a regular nuget restore to get msbuild working
     nuget restore
 
@@ -267,6 +269,32 @@ else {
 
         $msbuildExe = & $vsWhereExe -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | select-object -first 1
         
+    }
+
+    # Need to update the assembly redirects in any app.config files
+    # For this we need the non-prerelease version info
+    $majorPart = $exactPackageVersion -split '-' | Select-Object -First 1;
+
+    # Go find all the App.config files in the test folder
+    $allAppConfigs = Get-ChildItem "test" -Filter "App.config" -Recurse;
+
+    foreach ($cfg in $allAppConfigs) {
+        
+        [xml] $loadedAppConfig = Get-Content $cfg.FullName -Raw;
+
+        $assemblyBinding = $loadedAppConfig.configuration.runtime.assemblyBinding;
+
+        [System.Xml.XmlNamespaceManager]$ns = $loadedAppConfig.NameTable
+        $ns.AddNamespace("b", $assemblyBinding.NamespaceURI)
+    
+        $assemblyIdentity = $assemblyBinding.SelectSingleNode("b:dependentAssembly/b:assemblyIdentity[@name='Autofac']", $ns)
+        
+        if($assemblyIdentity)
+        {
+            $assemblyIdentity.NextSibling.newVersion = "$majorPart.0";
+            $loadedAppConfig.Save($cfg.FullName);
+        }
+
     }
 
     & $msbuildExe -t:Rebuild -p:Configuration=Release
